@@ -1,0 +1,163 @@
+extern crate cribbage;
+use serde::{Deserialize, Serialize};
+use std::io::{Read, Write};
+use std::net;
+use std::sync::mpsc;
+
+// Handles input and output to each client
+pub fn handle_client(
+    // The TCP stream the handler takes for the client given when spawning the thread
+    mut client_stream: net::TcpStream,
+    // The transmitter used to send messages to the game thread; shared with the other clients
+    game_handler_transmitter: mpsc::Sender<super::messages::ClientToGame>,
+    game_handler_receiver: mpsc::Receiver<super::messages::GameToClient>,
+) {
+    let mut is_disconncted = false;
+
+    game_handler_transmitter.send(super::messages::ClientToGame::Greeting);
+
+    // While the connection is accepted
+    while !is_disconncted {
+        // Forward message from receiver to the client then wait for client response
+        let mut packet_from_client = [0 as u8; 256];
+        match game_handler_receiver.recv() {
+            // When all the maximum number of players has been connected and the connection is
+            // denied
+            Ok(super::messages::GameToClient::DeniedTableFull) => {
+                client_stream
+                    .write(
+                        &bincode::serialize(&super::messages::GameToClient::DeniedTableFull)
+                            .unwrap(),
+                    )
+                    .unwrap();
+                is_disconncted = true;
+            }
+
+            // Accepts the player's name
+            Ok(super::messages::GameToClient::WaitName) => {
+                let mut valid_name = false;
+                while !valid_name {
+                    client_stream
+                        .write(
+                            &bincode::serialize(&super::messages::GameToClient::WaitName).unwrap(),
+                        )
+                        .unwrap();
+                    client_stream.read(&mut packet_from_client).unwrap();
+                    let client_to_game: super::messages::ClientToGame =
+                        bincode::deserialize(&packet_from_client).unwrap();
+                    match client_to_game {
+                        super::messages::ClientToGame::Name(name) => {
+                            valid_name = true;
+                            game_handler_transmitter
+                                .send(super::messages::ClientToGame::Name(name))
+                                .unwrap();
+                        }
+                        _ => {
+                            packet_from_client = [0 as u8; 256];
+                        }
+                    };
+                }
+            }
+
+            // Forwards the notification
+            Ok(super::messages::GameToClient::PlayerJoinNotification { name, number, of }) => {
+                client_stream
+                    .write(
+                        &bincode::serialize(
+                            &super::messages::GameToClient::PlayerJoinNotification {
+                                name: name,
+                                number: number,
+                                of: of,
+                            },
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+            }
+
+            // Forwards the request for the cut and waits for a response from the client
+            Ok(super::messages::GameToClient::WaitInitialCut) => {
+                let mut has_sent_confirmation = false;
+                while !has_sent_confirmation {
+                    client_stream
+                        .write(
+                            &bincode::serialize(&super::messages::GameToClient::WaitInitialCut)
+                                .unwrap(),
+                        )
+                        .unwrap();
+
+                    client_stream.read(&mut packet_from_client).unwrap();
+
+                    let client_to_game: super::messages::ClientToGame =
+                        bincode::deserialize(&packet_from_client).unwrap();
+
+                    match client_to_game {
+                        super::messages::ClientToGame::Confirmation => {
+                            game_handler_transmitter
+                                .send(super::messages::ClientToGame::Confirmation)
+                                .unwrap();
+                            has_sent_confirmation = true;
+                        }
+                        _ => {
+                            packet_from_client = [0 as u8; 256];
+                        }
+                    }
+                }
+            }
+
+            // Simple forwarding
+            Ok(super::messages::GameToClient::InitialCutResult { name, card }) => {
+                client_stream
+                    .write(
+                        &bincode::serialize(&super::messages::GameToClient::InitialCutResult {
+                            name: name,
+                            card: card,
+                        })
+                        .unwrap(),
+                    )
+                    .unwrap();
+            }
+
+            Ok(super::messages::GameToClient::InitialCutSuccess(string)) => {
+                client_stream
+                    .write(
+                        &bincode::serialize(&super::messages::GameToClient::InitialCutSuccess(
+                            string,
+                        ))
+                        .unwrap(),
+                    )
+                    .unwrap();
+            }
+
+            Ok(super::messages::GameToClient::InitialCutFailure) => {
+                client_stream
+                    .write(
+                        &bincode::serialize(&super::messages::GameToClient::InitialCutFailure)
+                            .unwrap(),
+                    )
+                    .unwrap();
+            }
+
+            Ok(super::messages::GameToClient::Disconnect) => {
+                is_disconncted = true;
+            }
+
+            _ => {
+                println!("Unexpected message from game handler");
+                client_stream
+                    .write(
+                        &bincode::serialize(&super::messages::GameToClient::Error(String::from(
+                            "Unexpected message from game handler",
+                        )))
+                        .unwrap(),
+                    )
+                    .unwrap();
+                is_disconncted = true;
+            }
+        }
+    }
+
+    client_stream
+        .write(&bincode::serialize(&super::messages::GameToClient::Disconnect).unwrap())
+        .unwrap();
+}
