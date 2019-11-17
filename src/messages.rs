@@ -21,7 +21,7 @@ pub enum ClientToGame {
 
 // Messages sent from the game model to the client handler threads which more directly interact
 // with the players; also the messages sent from the client handler to the client over TCP
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 pub enum GameToClient {
     // Message indicating that the maximum number of cliets that can play have already joined
     DeniedTableFull,

@@ -4,6 +4,7 @@ mod client;
 mod game;
 mod messages;
 use std::env;
+use std::io;
 use std::net;
 use std::str;
 use std::sync::mpsc;
@@ -22,8 +23,7 @@ fn main() {
     address.push_str(&args[1]);
 
     // Parses the number of players to wait for
-    let mut desired_num_players: u8 = args[2].trim().parse().unwrap();
-    let mut active_num_players: u8 = 0;
+    let desired_num_players: u8 = args[2].trim().parse().unwrap();
 
     // Parses the boolean options given in the command line arguments
     let man_score: bool = str::FromStr::from_str(&args[3]).unwrap();
@@ -31,7 +31,11 @@ fn main() {
     let muggins: bool = str::FromStr::from_str(&args[5]).unwrap();
     let overpegging: bool = str::FromStr::from_str(&args[6]).unwrap();
 
+    // The TCP listener to form connections
     let listener = net::TcpListener::bind(&address).unwrap();
+    listener
+        .set_nonblocking(true)
+        .expect("Can not set listener non-blocking");
 
     // The game object to be used on the server
     let mut game = cribbage::Game::new();
@@ -42,7 +46,7 @@ fn main() {
     thread::spawn(move || {
         game::handle_game(
             game,
-            desired_num_players.clone(),
+            desired_num_players,
             man_score,
             underpegging,
             muggins,
@@ -54,21 +58,18 @@ fn main() {
 
     println!("Waiting for connection on ip {}", address);
 
-    // Forward each cliet to the cliet handler
-    'listen_loop: for mut stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                // FIXME Error exiting main thread
-                // Check for the end signal
-                match game_handler_to_main_receiver.try_recv() {
-                    Ok(messages::GameToMain::EndServer) => {
-                        break 'listen_loop;
-                    }
-                    _ => {}
-                }
-
-                // Creates the transmitter and receivers used by the game model to communicate with the
-                // client
+    let mut game_over = false;
+    while !game_over {
+        // Continuously poll for an end server event
+        game_over = match game_handler_to_main_receiver.try_recv() {
+            Ok(messages::GameToMain::EndServer) => true,
+            _ => false,
+        };
+        // And poll for a new connection to the listener
+        match listener.accept() {
+            Ok((socket, address)) => {
+                // Creates the transmitters and receivers used by the game model to communicate
+                // with each client handler thread
                 let (
                     client_handler_to_game_handler_transmitter,
                     client_handler_to_game_handler_receiver,
@@ -78,16 +79,17 @@ fn main() {
                     game_handler_to_client_handler_receiver,
                 ) = mpsc::channel();
 
+                // Spawns the client handler thread and gives ownership of the proper transmitter
+                // and receiver
                 thread::spawn(move || {
                     client::handle_client(
-                        stream,
+                        socket,
                         client_handler_to_game_handler_transmitter,
                         game_handler_to_client_handler_receiver,
                     );
                 });
 
-                // Send the new transmitter for the messages from the game model thread to the
-                // new client thread to the game model
+                // Send the other transmitter and receiver to the game model thread
                 main_to_game_handler_transmitter
                     .send(messages::MainToGame::NewClient {
                         transmitter: game_handler_to_client_handler_transmitter,
@@ -95,12 +97,13 @@ fn main() {
                     })
                     .unwrap();
 
-                active_num_players += 1;
+                println!("Connected to client on {}", address);
             }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {}
             Err(e) => {
-                println!("Error accepting connection to client; {}", e);
+                println!("{}", e);
             }
-        }
+        };
     }
 
     println!("Exiting server");
