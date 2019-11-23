@@ -51,6 +51,15 @@ pub enum GameToClient {
     // That the cut has resulted in a tie and that it must be redone
     InitialCutFailure,
 
+    // That the game is waiting for confirmation to deal the hand
+    WaitDeal,
+
+    // That cards are actively being dealt
+    Dealing,
+
+    // That the player's hand is the included vector
+    DealtHand(Vec<cribbage::deck::Card>),
+
     // That an error has occured
     Error(String),
 

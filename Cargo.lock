@@ -36,7 +36,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 [[package]]
 name = "cribbage"
 version = "0.1.0"
-source = "git+https://github.com/scrblue/cribbage_lib#de85e2451cac8ed1b7ae1c125b0ff504467192b0"
+source = "git+https://github.com/scrblue/cribbage_lib#63a816b8a500e8019ddf9e21aef44f3ccea41e1f"
 dependencies = [
  "rand 0.7.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde 1.0.102 (registry+https://github.com/rust-lang/crates.io-index)",

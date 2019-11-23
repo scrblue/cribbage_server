@@ -14,7 +14,9 @@ pub fn handle_client(
 ) {
     let mut is_disconncted = false;
 
-    game_handler_transmitter.send(super::messages::ClientToGame::Greeting);
+    game_handler_transmitter
+        .send(super::messages::ClientToGame::Greeting)
+        .unwrap();
 
     // While the connection is accepted
     while !is_disconncted {
@@ -30,7 +32,6 @@ pub fn handle_client(
                             .unwrap(),
                     )
                     .unwrap();
-                is_disconncted = true;
             }
 
             // Accepts the player's name
@@ -51,6 +52,7 @@ pub fn handle_client(
                             game_handler_transmitter
                                 .send(super::messages::ClientToGame::Name(name))
                                 .unwrap();
+                            packet_from_client = [0 as u8; 256];
                         }
                         _ => {
                             packet_from_client = [0 as u8; 256];
@@ -97,6 +99,7 @@ pub fn handle_client(
                                 .send(super::messages::ClientToGame::Confirmation)
                                 .unwrap();
                             has_sent_confirmation = true;
+                            packet_from_client = [0 as u8; 256];
                         }
                         _ => {
                             packet_from_client = [0 as u8; 256];
@@ -138,8 +141,59 @@ pub fn handle_client(
                     .unwrap();
             }
 
+            Ok(super::messages::GameToClient::WaitDeal) => {
+                let mut has_sent_confirmation = false;
+                while !has_sent_confirmation {
+                    client_stream
+                        .write(
+                            &bincode::serialize(&super::messages::GameToClient::WaitDeal).unwrap(),
+                        )
+                        .unwrap();
+
+                    client_stream.read(&mut packet_from_client).unwrap();
+
+                    let client_to_game: super::messages::ClientToGame =
+                        bincode::deserialize(&packet_from_client).unwrap();
+
+                    match client_to_game {
+                        super::messages::ClientToGame::Confirmation => {
+                            game_handler_transmitter
+                                .send(super::messages::ClientToGame::Confirmation)
+                                .unwrap();
+                            has_sent_confirmation = true;
+                            packet_from_client = [0 as u8; 256];
+                        }
+                        _ => {
+                            packet_from_client = [0 as u8; 256];
+                        }
+                    }
+                }
+
+                client_stream
+                    .write(&bincode::serialize(&super::messages::GameToClient::WaitDeal).unwrap())
+                    .unwrap();
+            }
+
+            Ok(super::messages::GameToClient::Dealing) => {
+                client_stream
+                    .write(&bincode::serialize(&super::messages::GameToClient::Dealing).unwrap())
+                    .unwrap();
+            }
+
+            Ok(super::messages::GameToClient::DealtHand(hand)) => {
+                client_stream
+                    .write(
+                        &bincode::serialize(&super::messages::GameToClient::DealtHand(hand))
+                            .unwrap(),
+                    )
+                    .unwrap();
+            }
+
             Ok(super::messages::GameToClient::Disconnect) => {
                 is_disconncted = true;
+                client_stream
+                    .write(&bincode::serialize(&super::messages::GameToClient::Disconnect).unwrap())
+                    .unwrap();
             }
 
             _ => {
@@ -156,8 +210,4 @@ pub fn handle_client(
             }
         }
     }
-
-    client_stream
-        .write(&bincode::serialize(&super::messages::GameToClient::Disconnect).unwrap())
-        .unwrap();
 }
