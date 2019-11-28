@@ -2,6 +2,8 @@ extern crate cribbage;
 use std::sync::mpsc;
 use std::{thread, time};
 
+// TODO Handle all the unwraps and do proper error handling and all
+
 #[derive(PartialEq, Debug)]
 enum GciState {
     // The state given to a client that has just connected and who has yet to send the greeting
@@ -13,34 +15,31 @@ enum GciState {
     // Any players who have joined the table and who have been asked for a name
     WaitingName,
 
-    // Players who have already given their name and who are waiting for other players to do the
-    // same
-    WaitingOtherNames,
-
     // The player who has been requested confirmation for the cut
     WaitingForInitialCut,
-
-    // The players who have already given confirmation or who have yet to be asked for their
-    // confirmation for their cuts
-    WaitingForOtherInitialCuts,
 
     // The dealer who's confirmation deals the hands
     WaitingForDeal,
 
-    // The dealer who's confirmation for dealing the hand has been received
-    Dealt,
+    // When the client has disconnected and the GCI should be cleaned up
+    Disconnected,
 
-    // When the game has finished
-    End,
+    // That then client is waiting for a message from the server to continue
+    WaitingForServer,
 }
 
 // A structure tying a player index in the game to a transmitter and receiver for a client handling
 // thread
 struct GameClientInterface {
-    // The index
+    // The player index in the Game players vector that corresponds to this client
     index: Option<u8>,
+
+    // The transmitter and receiver to the thread handling the client
     transmitter: mpsc::Sender<super::messages::GameToClient>,
     receiver: mpsc::Receiver<super::messages::ClientToGame>,
+
+    // The state of the client, what input is required or that the client is waiting for input from
+    // the server
     state: GciState,
 }
 
@@ -50,6 +49,63 @@ struct GameClientInterface {
 struct ClientMessage {
     index: u8,
     message: super::messages::ClientToGame,
+}
+
+// A struct used for keeping track of the inputs required from each player when players are asked
+// for a certain input in the order by player index. For when input is required in order by index
+// it tracks the active index, the last active index, the index to stop at, and the input required.
+// For example, the active index starting at zero, the index to stop at being num_players - 1, and
+// the input required being Confirmation means that every player must provide confirmation in the
+// order that they joined the game such as during the initial cut. If the active index starts at
+// (index_dealer + 1) % num_players, has no stop point, and requires PlayEvents then it will ask
+// for PlayEvents from each player in a circle on loop until the end of the play phase.
+struct OrderedInputTracker {
+    index_active: u8,
+    index_last: Option<u8>,
+    index_stop: Option<u8>,
+}
+
+// Sends a message to a given client interface and assures that the message has been received
+// TODO Get it to return an error if the message is not TransmissionReceived instead of using an
+// assert
+fn send_message(message: super::messages::GameToClient, gci: &mut GameClientInterface) {
+    gci.transmitter.send(message).unwrap();
+    assert!(gci.receiver.recv() == Ok(super::messages::ClientToGame::TransmissionReceived));
+}
+
+// Simply returns whether or not all players in a vector of GameClientInterfaces are waiting for a
+// message from the server
+fn are_all_players_waiting(gcis: &Vec<GameClientInterface>) -> bool {
+    // Whether or not any player isn't waiting
+    let mut not_waiting = false;
+    for gci in gcis {
+        // Only check the GameClientInterface state if the client is a player
+        if gci.index.is_some() {
+            if gci.state != GciState::WaitingForServer {
+                not_waiting = true;
+            }
+        }
+    }
+
+    !not_waiting
+}
+
+// Send all hands to each player
+// TODO Return error if send fails when error handling is dealt with
+fn send_hands(game_object: &cribbage::Game, clients: &mut Vec<GameClientInterface>) {
+    for mut client in clients {
+        // Only report hands to players
+        if client.index.is_some() {
+            send_message(
+                super::messages::GameToClient::DealtHand(
+                    game_object.players[client.index.unwrap() as usize]
+                        .hand
+                        .clone(),
+                ),
+                &mut client,
+            );
+        }
+    }
 }
 
 // Handles the game object
@@ -68,22 +124,17 @@ pub fn handle_game(
     // transmitter and receiver comunicate with
     let mut client_interfaces: Vec<GameClientInterface> = Vec::new();
 
-    // A variable tracking the player index that was last requested input eg. the confirmation call
-    // when dealing with the initial, the index that last responded,  the index that it started
-    // with, and the index it's stopping at. 0 and num_players - 1 requires all players to provide
-    // input in order, index_dealer + 1 to index dealer is the first pone to the dealer in order,
-    // a single index for both is requesting input from one player only
-    let mut active_index: Option<u8> = None;
-    let mut last_index: Option<u8> = None;
-    let mut start_index: Option<u8> = None;
-    let mut stop_index: Option<u8> = None;
+    // A vector containing a list of ClietMessages received from any client such that a mutable
+    // reference to client_interfaces is only used for the duration of the loop adding client
+    // messages
+    let mut client_messages: Vec<ClientMessage> = Vec::new();
+
+    // A variable tracking the player indexs that must send input eg. the confirmation call
+    let mut input_tracker: Option<OrderedInputTracker> = None;
 
     // A variable tracking the number of clients that are also players; less than or equal to the
     // number of players
     let mut num_connected_players: u8 = 0;
-
-    // A vector holding a list of messages to be sent to every client
-    let mut announcement_list: Vec<super::messages::GameToClient> = Vec::new();
 
     // A vector of strings holding player names to be fed to the game_object; loop is to create an
     // empty string for each name so they can be filled out of order
@@ -130,70 +181,32 @@ pub fn handle_game(
                             println!("New player");
                             client_interface.index = Some(num_connected_players);
                             client_interface.state = GciState::WaitingName;
-                            client_interface
-                                .transmitter
-                                .send(super::messages::GameToClient::WaitName)
-                                .unwrap();
+                            send_message(super::messages::GameToClient::WaitName, client_interface);
                             num_connected_players += 1;
                         } else {
                             println!("New watcher");
                             client_interface.state = GciState::Watching;
-                            client_interface
-                                .transmitter
-                                .send(super::messages::GameToClient::DeniedTableFull)
-                                .unwrap();
+                            send_message(
+                                super::messages::GameToClient::DeniedTableFull,
+                                client_interface,
+                            );
                         }
                     }
                 }
-                // If the client sends a Name message during the GameStart GameState and the
-                // WaitName GciState, add the name to the vector and announce the name to the
-                // players
-                Ok(super::messages::ClientToGame::Name(name)) => {
-                    println!("Received Name");
-                    if client_interface.state == GciState::WaitingName
-                        && game_object.state == cribbage::GameState::GameStart
-                    {
-                        names[client_interface.index.unwrap() as usize] = name;
-                        client_interface.state = GciState::WaitingOtherNames;
-                        announcement_list.push(
-                            super::messages::GameToClient::PlayerJoinNotification {
-                                name: names[client_interface.index.unwrap() as usize].clone(),
-                                number: client_interface.index.unwrap() + 1,
-                                of: num_players,
-                            },
+
+                // Simple forwards to the client_messages vector; ignores input from any client
+                // that isn't a player and sends a DeniedTableFull message
+                Ok(message) => {
+                    if client_interface.index.is_some() {
+                        client_messages.push(ClientMessage {
+                            index: client_interface.index.unwrap(),
+                            message: message,
+                        })
+                    } else {
+                        send_message(
+                            super::messages::GameToClient::DeniedTableFull,
+                            client_interface,
                         );
-                    }
-                }
-
-                // If the cliet sends confirmation under various conditions
-                Ok(super::messages::ClientToGame::Confirmation) => {
-                    // If the client with the active index sends confirmation when GciState is
-                    // WaitingForInitialCut, add their cut to the announcements
-                    // Unwrap or is 6 and 7 as a maximum of 5 players can play and the condition
-                    // should not resolve to true if either value is None
-                    if client_interface.index.unwrap_or(6) == active_index.unwrap_or(7)
-                        && client_interface.state == GciState::WaitingForInitialCut
-                    {
-                        announcement_list.push(super::messages::GameToClient::InitialCutResult {
-                            name: game_object.players[client_interface.index.unwrap() as usize]
-                                .username
-                                .clone(),
-                            card: game_object.players[client_interface.index.unwrap() as usize]
-                                .hand[0],
-                        });
-                        client_interface.state = GciState::WaitingForOtherInitialCuts;
-                        last_index = active_index;
-                        active_index = Some(active_index.unwrap() + 1);
-                    }
-
-                    // If the client game index is the index of the dealer (if the client is the
-                    // dealer_ and the GciState is WaitingForDeal, chang the state to dealt and
-                    // notify players that cards are being dealt
-                    if client_interface.index.unwrap_or(6) == game_object.index_dealer
-                        && client_interface.state == GciState::WaitingForDeal
-                    {
-                        announcement_list.push(super::messages::GameToClient::Dealing);
-                        client_interface.state = GciState::Dealt;
                     }
                 }
 
@@ -201,223 +214,378 @@ pub fn handle_game(
             }
         }
 
-        for client_interface in &mut client_interfaces {
-            // Send all announcements that were not added in this loop of the game loop
-            for announcement in &announcement_list {
-                println!("Making annoucement");
-                client_interface
-                    .transmitter
-                    .send(announcement.clone())
-                    .unwrap();
-            }
-        }
-
-        announcement_list.clear();
-
-        // Processes that occur after player input has been dealt with
-
-        // When GameState is GameStart, the proper number of players have connected, and all
-        // players states are WaitingOtherNames, progress through the CutInitial and send the
-        // WaitInitialCut message to player index 0
-        if num_connected_players == num_players
-            && game_object.state == cribbage::GameState::GameStart
-        {
-            let mut is_waiting_other_names = true;
-            for client_interface in &client_interfaces {
-                if client_interface.index.is_some()
-                    && client_interface.state != GciState::WaitingOtherNames
+        // Deal with clients depending on the state of the game and the input received and set the
+        // output variable to the sclient_interfaces[input.index as usize].state == GciState::WaitingNametatus message this processing dictates
+        output = match game_object.state {
+            // If the GameState is GameStart, accept player name messages until the number of
+            // connected players equals the number of players in the game and all players are
+            // waiting. When both conditions are true, process the GameSetup event
+            cribbage::GameState::GameStart => {
+                if num_connected_players != num_players
+                    || !are_all_players_waiting(&client_interfaces)
                 {
-                    is_waiting_other_names = false;
-                }
-            }
-
-            if is_waiting_other_names {
-                game_object
-                    .process_event(cribbage::GameEvent::GameSetup {
-                        input_player_names: names.clone(),
-                        input_manual: man_scoring,
-                        input_underscoring: underpegging,
-                        input_muggins: muggins,
-                        input_overscoring: overpegging,
-                    })
-                    .unwrap();
-
-                // Progress the game through the first initial; if there is a tie the cut is redone
-                game_object
-                    .process_event(cribbage::GameEvent::Confirmation)
-                    .unwrap();
-
-                // Set the active index to zero and send the WaitInitialCut to player index 0
-                active_index = Some(0);
-                start_index = Some(0);
-                stop_index = Some(num_players - 1);
-                for client_interface in &mut client_interfaces {
-                    if client_interface.index == Some(0) {
-                        client_interface
-                            .transmitter
-                            .send(super::messages::GameToClient::WaitInitialCut)
-                            .unwrap();
-                        client_interface.state = GciState::WaitingForInitialCut;
-                    } else {
-                        client_interface.state = GciState::WaitingForOtherInitialCuts;
+                    for input in &client_messages {
+                        // If the message reveived is a Name message and the input is from a client
+                        // who's state is WaitingName process the name; if the state is not
+                        // WaitingName or the message is not a Name, send an error or another
+                        // request for the client to send their name
+                        if let super::messages::ClientToGame::Name(name) = &input.message {
+                            if client_interfaces[input.index as usize].state
+                                == GciState::WaitingName
+                            {
+                                // Set the correct element of names to the received name, change
+                                // the client's state, and announce the player joining to all
+                                // clients
+                                names[input.index as usize] = name.to_string();
+                                client_interfaces[input.index as usize].state =
+                                    GciState::WaitingForServer;
+                                for client_interface in &mut client_interfaces {
+                                    send_message(
+                                        super::messages::GameToClient::PlayerJoinNotification {
+                                            name: names[input.index as usize].clone(),
+                                            number: input.index + 1,
+                                            of: num_players,
+                                        },
+                                        client_interface,
+                                    )
+                                }
+                            } else {
+                                send_message(
+                                    super::messages::GameToClient::Error(
+                                        "Input is not required".to_string(),
+                                    ),
+                                    &mut client_interfaces[input.index as usize],
+                                )
+                            }
+                        }
+                        // If the message received is not a Name message and one is required, send
+                        // the WaitName message; if it is not required send an error
+                        else if client_interfaces[input.index as usize].state
+                            == GciState::WaitingName
+                        {
+                            send_message(
+                                super::messages::GameToClient::WaitName,
+                                &mut client_interfaces[input.index as usize],
+                            )
+                        } else {
+                            send_message(
+                                super::messages::GameToClient::Error(
+                                    "Input is not required".to_string(),
+                                ),
+                                &mut client_interfaces[input.index as usize],
+                            )
+                        }
                     }
+
+                    Ok("Waiting for players or names")
                 }
-            }
-        }
-
-        // When all the players' states are WaitingForOtherInitialCuts and the last index is
-        // below the stop index (ie when someone has given their confirmation and the
-        // active index has incremented), change the state of the client interface with the
-        // index corresponding to the active index to WaitingForInitialCut to indicate that
-        // their confirmation is now requested
-        if game_object.state == cribbage::GameState::CutInitial
-            || game_object.state == cribbage::GameState::Deal
-        {
-            let mut is_waiting_for_other_cuts = true;
-            for client_interface in &client_interfaces {
-                if client_interface.index.is_some()
-                    && client_interface.state != GciState::WaitingForOtherInitialCuts
-                {
-                    is_waiting_for_other_cuts = false;
-                }
-            }
-
-            if is_waiting_for_other_cuts && last_index != stop_index {
-                for client_interface in &mut client_interfaces {
-                    if client_interface.index == active_index {
-                        println!("Index is active");
-                        client_interface.state = GciState::WaitingForInitialCut;
-                        thread::sleep(time::Duration::from_secs(1));
-                        client_interface
-                            .transmitter
-                            .send(super::messages::GameToClient::WaitInitialCut)
-                            .unwrap();
-                    } else {
-                        println!("Index isn't active");
-                    }
-                }
-            }
-        }
-
-        // When GameState is CutInitial and the last index is equal to the number of players - 1
-        // (ie when the cut must be repeated and and the all players from the previous cut have
-        // confirmed), redo the cut
-        if game_object.state == cribbage::GameState::CutInitial && last_index == stop_index {
-            for client_interface in &mut client_interfaces {
-                client_interface
-                    .transmitter
-                    .send(super::messages::GameToClient::InitialCutFailure)
-                    .unwrap();
-            }
-            game_object
-                .process_event(cribbage::GameEvent::Confirmation)
-                .unwrap();
-
-            // Set the indices and send the WaitInitialCut to player index 0
-            active_index = Some(0);
-            start_index = Some(0);
-            stop_index = Some(num_players - 1);
-            last_index = None;
-
-            for client_interface in &mut client_interfaces {
-                if client_interface.index == Some(0) {
-                    client_interface
-                        .transmitter
-                        .send(super::messages::GameToClient::WaitInitialCut)
-                        .unwrap();
-                }
-            }
-        }
-
-        // When GameState is Deal and all last index is equal to the number of players - 1(ie when
-        // the cut was successful and all players from the previous cut have confirmed) send notice
-        // to dealer to deal the cards
-        if game_object.state == cribbage::GameState::Deal
-            && last_index.is_some()
-            && last_index == stop_index
-        {
-            for client_interface in &mut client_interfaces {
-                client_interface
-                    .transmitter
-                    .send(super::messages::GameToClient::InitialCutSuccess(
-                        game_object.players[game_object.index_dealer as usize]
-                            .username
-                            .clone(),
-                    ))
-                    .unwrap();
-                if client_interface.index == Some(game_object.index_dealer) {
-                    client_interface.state = GciState::WaitingForDeal;
-                    thread::sleep(time::Duration::from_secs(1));
-                    client_interface
-                        .transmitter
-                        .send(super::messages::GameToClient::WaitDeal)
-                        .unwrap();
-                }
-            }
-
-            active_index = None;
-            last_index = None;
-            start_index = None;
-            stop_index = None;
-        }
-
-        // When the GameState is Deal and the dealer's GciState is Dealt, process the game object
-        // and announce the cards, sort them and announce the sorted deck, and end the game
-        if game_object.state == cribbage::GameState::Deal {
-            // Determine if confirmation has been sent and process through the deal
-            let mut is_dealt = false;
-            for client_interface in &client_interfaces {
-                if client_interface.index == Some(game_object.index_dealer)
-                    && client_interface.state == GciState::Dealt
-                {
-                    is_dealt = true;
+                // When the number of players is correct and every player is waiting for the
+                // server, process the GameSetup event to proceed to CutInitial
+                else {
                     game_object
-                        .process_event(cribbage::GameEvent::Confirmation)
+                        .process_event(cribbage::GameEvent::GameSetup {
+                            input_player_names: names.clone(),
+                            input_manual: man_scoring,
+                            input_underscoring: underpegging,
+                            input_muggins: muggins,
+                            input_overscoring: overpegging,
+                        })
                         .unwrap();
+
+                    Ok("GameSetup event processed")
                 }
             }
 
-            if is_dealt {
-                thread::sleep(time::Duration::from_secs(1));
-
-                // Send unsorted hands
-                for client_interface in &mut client_interfaces {
-                    if client_interface.index.is_some() {
-                        client_interface
-                            .transmitter
-                            .send(super::messages::GameToClient::DealtHand(
-                                game_object.players[client_interface.index.unwrap() as usize]
-                                    .hand
-                                    .clone(),
-                            ))
+            // If the GameState is CutInitial, either the GameSetup event has just been processed
+            // or the initial cut has failed. If it has failed and not all Confirmations from
+            // players have been received (indicated by an input_tracker that is Some) either
+            // continue to process Confirmations or reset the input_tracker to None to indicate
+            // that the next cut should proceed once all Confirmations from each player has been
+            // received. If the input_tracker is None, then the Game is ready to process the
+            // Confirmation event and set up the input_tracker to receive Confirmations from each
+            // player.
+            cribbage::GameState::CutInitial => {
+                match &mut input_tracker {
+                    // Process the Confirmation event to perform the cuts, then set up the
+                    // input_tracker to receive Confirmations from each player in order by index
+                    // and send a message asking for confirmation to index 0
+                    None => {
+                        game_object
+                            .process_event(cribbage::GameEvent::Confirmation)
                             .unwrap();
+
+                        input_tracker = Some(OrderedInputTracker {
+                            index_active: 0,
+                            index_last: None,
+                            index_stop: Some(num_players - 1),
+                        });
+
+                        client_interfaces[0].state = GciState::WaitingForInitialCut;
+                        send_message(
+                            super::messages::GameToClient::WaitInitialCut,
+                            &mut client_interfaces[0],
+                        );
+
+                        Ok("Processed CutInitial and set up input_tracker for receiving Confirmations from each player")
+                    }
+
+                    // If all Confirmations have been processed (when index_last of the
+                    // input_tracker is equal to index_stop) reset the tracker to None to indicate
+                    // that the next CutInitial should proceed. If not all Confirmations have been
+                    // processed, procees the incoming inputs
+                    Some(ordered_input_tracker) => {
+                        if ordered_input_tracker.index_last.is_some()
+                            && ordered_input_tracker.index_last == ordered_input_tracker.index_stop
+                        {
+                            for client_interface in &mut client_interfaces {
+                                send_message(
+                                    super::messages::GameToClient::InitialCutFailure,
+                                    client_interface,
+                                )
+                            }
+                            input_tracker = None;
+                            Ok("All Confirmations received, input_tracker reset")
+                        } else {
+                            // If all players are waiting, then advance the index_active and
+                            // index_last and send a WaitInitialCut message to the next client
+                            if are_all_players_waiting(&client_interfaces) {
+                                ordered_input_tracker.index_last =
+                                    Some(ordered_input_tracker.index_active);
+                                ordered_input_tracker.index_active += 1;
+
+                                // If not all players have given confirmation, ask the next player
+                                // for confirmation
+                                if ordered_input_tracker.index_last
+                                    != ordered_input_tracker.index_stop
+                                {
+                                    client_interfaces
+                                        [ordered_input_tracker.index_active as usize]
+                                        .state = GciState::WaitingForInitialCut;
+                                    send_message(
+                                        super::messages::GameToClient::WaitInitialCut,
+                                        &mut client_interfaces
+                                            [ordered_input_tracker.index_active as usize],
+                                    )
+                                }
+
+                                Ok("Processed Confirmation successfully")
+                            }
+                            // If there is a player who is not waiting (WaitingForInitialCut should
+                            // be the only other state possible), check the client_messages vector
+                            // for a Confirmation event from the index_active
+                            else {
+                                for input in &client_messages {
+                                    if input.index == ordered_input_tracker.index_active {
+                                        // If a Confirmation event is received from the client
+                                        // corresponding to the index_active, announce the cut they
+                                        // received and change the state back to WaitingForServer
+                                        if input.message
+                                            == super::messages::ClientToGame::Confirmation
+                                        {
+                                            for client_interface in &mut client_interfaces {
+                                                send_message( super::messages::GameToClient::InitialCutResult{
+                                                    name: game_object.players[input.index as usize].username.clone(),
+                                                    card: game_object.players[input.index as usize].hand[0],
+                                                }, client_interface)
+                                            }
+
+                                            client_interfaces[input.index as usize].state =
+                                                GciState::WaitingForServer;
+                                        }
+                                        // If any other message is received from that client,
+                                        // resend the message asking for confirmation
+                                        else {
+                                            send_message(
+                                                super::messages::GameToClient::WaitInitialCut,
+                                                &mut client_interfaces[input.index as usize],
+                                            )
+                                        }
+                                    }
+                                    // If input is received by someone who is not the index_active,
+                                    // send an error indicating that they should not be sending a
+                                    // message
+                                    else {
+                                        send_message(
+                                            super::messages::GameToClient::Error(
+                                                "Input is not required from you".to_string(),
+                                            ),
+                                            &mut client_interfaces[input.index as usize],
+                                        )
+                                    }
+                                }
+                                Ok("Waiting for Confirmations to continue through the cut")
+                            }
+                        }
                     }
                 }
-
-                thread::sleep(time::Duration::from_secs(1));
-
-                // Sort the hands
-                game_object
-                    .process_event(cribbage::GameEvent::Confirmation)
-                    .unwrap();
-
-                // Send sorted hands
-                for client_interface in &mut client_interfaces {
-                    if client_interface.index.is_some() {
-                        client_interface
-                            .transmitter
-                            .send(super::messages::GameToClient::DealtHand(
-                                game_object.players[client_interface.index.unwrap() as usize]
-                                    .hand
-                                    .clone(),
-                            ))
-                            .unwrap();
-                    }
-                }
-
-                output = Ok("Server ending");
             }
-        }
+
+            // If the GameState is Deal then either the initial cut was successful but the server
+            // is still receiving Confirmations and announcing the cut or the server is waiting for
+            // Confirmation from the dealer to deal the cards. If the cuts are still being
+            // announced, process confirmations as in the CutInitial block, otherwise poll for
+            // confirmation from the dealer
+            cribbage::GameState::Deal => {
+                match &mut input_tracker {
+                    // If the input tracker is Some, then the server is still processing Confirmations
+                    // for the cut
+                    Some(ordered_input_tracker) => {
+                        // If the last index is the stop index (ie when all players have given
+                        // confirmation) send the InitialCutSuccess message and ask the client who
+                        // is dealer to send confirmation
+                        if ordered_input_tracker.index_last.is_some()
+                            && ordered_input_tracker.index_last == ordered_input_tracker.index_stop
+                        {
+                            for client_interface in &mut client_interfaces {
+                                send_message(
+                                    super::messages::GameToClient::InitialCutSuccess(
+                                        game_object.players[game_object.index_dealer as usize]
+                                            .username
+                                            .clone(),
+                                    ),
+                                    client_interface,
+                                )
+                            }
+
+                            client_interfaces[game_object.index_dealer as usize].state =
+                                GciState::WaitingForDeal;
+                            send_message(
+                                super::messages::GameToClient::WaitDeal,
+                                &mut client_interfaces[game_object.index_dealer as usize],
+                            );
+
+                            input_tracker = None;
+                            Ok("All Confirmations received, input_tracker reset")
+                        } else {
+                            // If all players are waiting, then advance the index_active and
+                            // index_last and send a WaitInitialCut message to the next client
+                            if are_all_players_waiting(&client_interfaces) {
+                                ordered_input_tracker.index_last =
+                                    Some(ordered_input_tracker.index_active);
+                                ordered_input_tracker.index_active += 1;
+
+                                // If not all players have given confirmation, ask the next player
+                                // for confirmation
+                                if ordered_input_tracker.index_last
+                                    != ordered_input_tracker.index_stop
+                                {
+                                    client_interfaces
+                                        [ordered_input_tracker.index_active as usize]
+                                        .state = GciState::WaitingForInitialCut;
+                                    send_message(
+                                        super::messages::GameToClient::WaitInitialCut,
+                                        &mut client_interfaces
+                                            [ordered_input_tracker.index_active as usize],
+                                    );
+                                }
+
+                                Ok("Processed Confirmation successfully")
+                            }
+                            // If there is a player who is not waiting (WaitingForInitialCut should
+                            // be the only other state possible), check the client_messages vector
+                            // for a Confirmation event from the index_active
+                            else {
+                                for input in &client_messages {
+                                    if input.index == ordered_input_tracker.index_active {
+                                        // If a Confirmation event is received from the client
+                                        // corresponding to the index_active, announce the cut they
+                                        // received and change the state back to WaitingForServer
+                                        if input.message
+                                            == super::messages::ClientToGame::Confirmation
+                                        {
+                                            for client_interface in &mut client_interfaces {
+                                                send_message(super::messages::GameToClient::InitialCutResult{
+                                                    name: game_object.players[input.index as usize].username.clone(),
+                                                    card: game_object.players[input.index as usize].hand[0],
+                                                }, client_interface)
+                                            }
+
+                                            client_interfaces[input.index as usize].state =
+                                                GciState::WaitingForServer;
+                                        }
+                                        // If any other message is received from that client,
+                                        // resend the message asking for confirmation
+                                        else {
+                                            send_message(
+                                                super::messages::GameToClient::WaitInitialCut,
+                                                &mut client_interfaces[input.index as usize],
+                                            )
+                                        }
+                                    }
+                                    // If input is received by someone who is not the index_active,
+                                    // send an error indicating that they should not be sending a
+                                    // message
+                                    else {
+                                        send_message(
+                                            super::messages::GameToClient::Error(
+                                                "Input is not required from you".to_string(),
+                                            ),
+                                            &mut client_interfaces[input.index as usize],
+                                        );
+                                    }
+                                }
+                                Ok("Waiting for Confirmations to continue through the cut")
+                            }
+                        }
+                    }
+
+                    // If the input tracker is None, then the server is waiting for Confirmation from
+                    // the dealer to deal the hands; poll for a confirmation event from the dealer
+                    // and when it is received process through the deal and sort phases and report
+                    // results
+                    None => {
+                        for input in &client_messages {
+                            if input.index == game_object.index_dealer {
+                                if input.message == super::messages::ClientToGame::Confirmation {
+                                    // Process game through deal
+                                    game_object
+                                        .process_event(cribbage::GameEvent::Confirmation)
+                                        .unwrap();
+                                    // Report unsorted hands
+                                    send_hands(&game_object, &mut client_interfaces);
+                                    // Process game through sort
+                                    game_object
+                                        .process_event(cribbage::GameEvent::Confirmation)
+                                        .unwrap();
+                                    // Report sorted hands
+                                    send_hands(&game_object, &mut client_interfaces);
+
+                                // TODO Set up clients for discard selection
+                                }
+                                // If the dealer sends a message other than confirmation, resend
+                                // the WaitDeal message
+                                else {
+                                    send_message(
+                                        super::messages::GameToClient::WaitDeal,
+                                        &mut client_interfaces[input.index as usize],
+                                    );
+                                }
+                            }
+                            // Send an Error message to any players who send a message beside the
+                            // dealer
+                            else {
+                                send_message(
+                                    super::messages::GameToClient::Error(
+                                        "Input is not required form you".to_string(),
+                                    ),
+                                    &mut client_interfaces[input.index as usize],
+                                );
+                            }
+                        }
+
+                        Ok("Waiting for confirmation from dealer")
+                    }
+                }
+            }
+
+            // Prepare the game to shutdown when the end state is reached
+            cribbage::GameState::End => Ok("Server ending"),
+
+            // Return an error for any
+            _ => Err("Unrecognized GameState"),
+        };
+
+        client_messages.clear();
     }
 
     match output {
@@ -433,6 +601,11 @@ pub fn handle_game(
             .transmitter
             .send(super::messages::GameToClient::Disconnect)
             .unwrap();
+
+        assert!(
+            client_interface.receiver.recv()
+                == Ok(super::messages::ClientToGame::TransmissionReceived)
+        );
     }
 
     main_transmitter

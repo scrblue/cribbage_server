@@ -17,6 +17,8 @@ pub enum ClientToGame {
     // The name the client wishes to be known by for the duration of the game
     // TODO A way to determine this with user authentication for eventual lobby and account system
     Name(String),
+
+    TransmissionReceived,
 }
 
 // Messages sent from the game model to the client handler threads which more directly interact

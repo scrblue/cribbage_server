@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::net;
 use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 // Handles input and output to each client
 pub fn handle_client(
@@ -32,6 +33,10 @@ pub fn handle_client(
                             .unwrap(),
                     )
                     .unwrap();
+                client_stream.flush().unwrap();
+                game_handler_transmitter
+                    .send(super::messages::ClientToGame::TransmissionReceived)
+                    .unwrap();
             }
 
             // Accepts the player's name
@@ -42,6 +47,10 @@ pub fn handle_client(
                         .write(
                             &bincode::serialize(&super::messages::GameToClient::WaitName).unwrap(),
                         )
+                        .unwrap();
+                    client_stream.flush().unwrap();
+                    game_handler_transmitter
+                        .send(super::messages::ClientToGame::TransmissionReceived)
                         .unwrap();
                     client_stream.read(&mut packet_from_client).unwrap();
                     let client_to_game: super::messages::ClientToGame =
@@ -75,6 +84,11 @@ pub fn handle_client(
                         .unwrap(),
                     )
                     .unwrap();
+
+                client_stream.flush().unwrap();
+                game_handler_transmitter
+                    .send(super::messages::ClientToGame::TransmissionReceived)
+                    .unwrap();
             }
 
             // Forwards the request for the cut and waits for a response from the client
@@ -86,6 +100,11 @@ pub fn handle_client(
                             &bincode::serialize(&super::messages::GameToClient::WaitInitialCut)
                                 .unwrap(),
                         )
+                        .unwrap();
+
+                    client_stream.flush().unwrap();
+                    game_handler_transmitter
+                        .send(super::messages::ClientToGame::TransmissionReceived)
                         .unwrap();
 
                     client_stream.read(&mut packet_from_client).unwrap();
@@ -119,6 +138,11 @@ pub fn handle_client(
                         .unwrap(),
                     )
                     .unwrap();
+
+                client_stream.flush().unwrap();
+                game_handler_transmitter
+                    .send(super::messages::ClientToGame::TransmissionReceived)
+                    .unwrap();
             }
 
             Ok(super::messages::GameToClient::InitialCutSuccess(string)) => {
@@ -130,6 +154,11 @@ pub fn handle_client(
                         .unwrap(),
                     )
                     .unwrap();
+
+                client_stream.flush().unwrap();
+                game_handler_transmitter
+                    .send(super::messages::ClientToGame::TransmissionReceived)
+                    .unwrap();
             }
 
             Ok(super::messages::GameToClient::InitialCutFailure) => {
@@ -138,6 +167,11 @@ pub fn handle_client(
                         &bincode::serialize(&super::messages::GameToClient::InitialCutFailure)
                             .unwrap(),
                     )
+                    .unwrap();
+
+                client_stream.flush().unwrap();
+                game_handler_transmitter
+                    .send(super::messages::ClientToGame::TransmissionReceived)
                     .unwrap();
             }
 
@@ -148,6 +182,11 @@ pub fn handle_client(
                         .write(
                             &bincode::serialize(&super::messages::GameToClient::WaitDeal).unwrap(),
                         )
+                        .unwrap();
+
+                    client_stream.flush().unwrap();
+                    game_handler_transmitter
+                        .send(super::messages::ClientToGame::TransmissionReceived)
                         .unwrap();
 
                     client_stream.read(&mut packet_from_client).unwrap();
@@ -168,15 +207,16 @@ pub fn handle_client(
                         }
                     }
                 }
-
-                client_stream
-                    .write(&bincode::serialize(&super::messages::GameToClient::WaitDeal).unwrap())
-                    .unwrap();
             }
 
             Ok(super::messages::GameToClient::Dealing) => {
                 client_stream
                     .write(&bincode::serialize(&super::messages::GameToClient::Dealing).unwrap())
+                    .unwrap();
+
+                client_stream.flush().unwrap();
+                game_handler_transmitter
+                    .send(super::messages::ClientToGame::TransmissionReceived)
                     .unwrap();
             }
 
@@ -187,12 +227,22 @@ pub fn handle_client(
                             .unwrap(),
                     )
                     .unwrap();
+
+                client_stream.flush().unwrap();
+                game_handler_transmitter
+                    .send(super::messages::ClientToGame::TransmissionReceived)
+                    .unwrap();
             }
 
             Ok(super::messages::GameToClient::Disconnect) => {
                 is_disconncted = true;
                 client_stream
                     .write(&bincode::serialize(&super::messages::GameToClient::Disconnect).unwrap())
+                    .unwrap();
+
+                client_stream.flush().unwrap();
+                game_handler_transmitter
+                    .send(super::messages::ClientToGame::TransmissionReceived)
                     .unwrap();
             }
 
@@ -205,6 +255,11 @@ pub fn handle_client(
                         )))
                         .unwrap(),
                     )
+                    .unwrap();
+
+                client_stream.flush().unwrap();
+                game_handler_transmitter
+                    .send(super::messages::ClientToGame::TransmissionReceived)
                     .unwrap();
                 is_disconncted = true;
             }
