@@ -21,6 +21,9 @@ enum GciState {
     // The dealer who's confirmation deals the hands
     WaitingForDeal,
 
+    // The players who need to select one or two cards to discard
+    WaitingForDiscards,
+
     // When the client has disconnected and the GCI should be cleaned up
     Disconnected,
 
@@ -63,6 +66,25 @@ struct OrderedInputTracker {
     index_active: u8,
     index_last: Option<u8>,
     index_stop: Option<u8>,
+}
+
+// An enum used to keep track of the player inputs that need to be held for the next process_event
+// call to the GameObject
+enum InputStore {
+    Names(Vec<String>),
+    Discards(Vec<DiscardSelection>),
+}
+
+enum DiscardSelection {
+    OneDiscard {
+        player_index: u8,
+        card_index: u8,
+    },
+    TwoDiscard {
+        player_index: u8,
+        card_index_one: u8,
+        card_index_two: u8,
+    },
 }
 
 // Sends a message to a given client interface and assures that the message has been received
@@ -138,16 +160,18 @@ pub fn handle_game(
 
     // A vector of strings holding player names to be fed to the game_object; loop is to create an
     // empty string for each name so they can be filled out of order
-    let mut names: Vec<String> = Vec::new();
+    let mut input_store: InputStore = InputStore::Names(Vec::new());
     for _ in 0..num_players {
-        names.push(String::new());
+        if let InputStore::Names(names) = &mut input_store {
+            names.push(String::new());
+        }
     }
 
     // A variable holding the output of the game loop
     let mut output: Result<&str, &str> = Ok("Game thread running");
 
     // While the output of the game model is valid
-    while output.is_ok() && output != Ok("Server ending") {
+    'game_loop: while output.is_ok() && output != Ok("Server ending") {
         // If there is a new client handler thread, create the GameClientInterface
         match main_receiver.try_recv() {
             Ok(super::messages::MainToGame::NewClient {
@@ -236,13 +260,18 @@ pub fn handle_game(
                                 // Set the correct element of names to the received name, change
                                 // the client's state, and announce the player joining to all
                                 // clients
-                                names[input.index as usize] = name.to_string();
+                                if let InputStore::Names(names) = &mut input_store {
+                                    names[input.index as usize] = name.to_string();
+                                } else {
+                                    output = Err("InputStore not Names");
+                                    break 'game_loop;
+                                }
                                 client_interfaces[input.index as usize].state =
                                     GciState::WaitingForServer;
                                 for client_interface in &mut client_interfaces {
                                     send_message(
                                         super::messages::GameToClient::PlayerJoinNotification {
-                                            name: names[input.index as usize].clone(),
+                                            name: name.to_string(),
                                             number: input.index + 1,
                                             of: num_players,
                                         },
@@ -282,16 +311,20 @@ pub fn handle_game(
                 // When the number of players is correct and every player is waiting for the
                 // server, process the GameSetup event to proceed to CutInitial
                 else {
-                    game_object
-                        .process_event(cribbage::GameEvent::GameSetup {
-                            input_player_names: names.clone(),
-                            input_manual: man_scoring,
-                            input_underscoring: underpegging,
-                            input_muggins: muggins,
-                            input_overscoring: overpegging,
-                        })
-                        .unwrap();
-
+                    if let InputStore::Names(names) = &input_store {
+                        game_object
+                            .process_event(cribbage::GameEvent::GameSetup {
+                                input_player_names: names.clone(),
+                                input_manual: man_scoring,
+                                input_underscoring: underpegging,
+                                input_muggins: muggins,
+                                input_overscoring: overpegging,
+                            })
+                            .unwrap();
+                    } else {
+                        output = Err("InputStore not Names");
+                        break 'game_loop;
+                    }
                     Ok("GameSetup event processed")
                 }
             }
@@ -550,7 +583,36 @@ pub fn handle_game(
                                     // Report sorted hands
                                     send_hands(&game_object, &mut client_interfaces);
 
-                                // TODO Set up clients for discard selection
+                                    // Set up clients for discard selection
+                                    for client_interface in &mut client_interfaces {
+                                        input_store = InputStore::Discards(Vec::new());
+
+                                        if num_players != 5
+                                            || client_interface.index
+                                                != Some(game_object.index_dealer)
+                                        {
+                                            client_interface.state = GciState::WaitingForDiscards;
+
+                                            // Ask for two discards when there are two players and
+                                            // one discard when there are three or more players
+                                            if num_players == 2 {
+                                                send_message(
+                                                    super::messages::GameToClient::WaitDiscardTwo,
+                                                    client_interface,
+                                                );
+                                            } else {
+                                                send_message(
+                                                    super::messages::GameToClient::WaitDiscardOne,
+                                                    client_interface,
+                                                );
+                                            }
+                                        }
+                                        // If there are five players and the client is the dealer,
+                                        // they do not discard a card
+                                        else {
+                                            client_interface.state = GciState::WaitingForServer;
+                                        }
+                                    }
                                 }
                                 // If the dealer sends a message other than confirmation, resend
                                 // the WaitDeal message
@@ -575,6 +637,167 @@ pub fn handle_game(
 
                         Ok("Waiting for confirmation from dealer")
                     }
+                }
+            }
+
+            // If the GameState is Discard, then the game is waiting for DiscardTwo (when two
+            // players) or DiscardOne (three to five players) messages.
+            cribbage::GameState::Discard => {
+                // If all players are waiting, construct the DiscardSelection event from the
+                // input_store and progress the game
+                if are_all_players_waiting(&client_interfaces) {
+                    // Prepare vector to be used in process_event
+                    let mut discards: Vec<Vec<cribbage::deck::Card>> = Vec::new();
+                    for _ in 0..num_players {
+                        discards.push(Vec::new());
+                    }
+
+                    if let InputStore::Discards(selections) = &input_store {
+                        for selection in selections {
+                            match selection {
+                                DiscardSelection::OneDiscard {
+                                    player_index,
+                                    card_index,
+                                } => {
+                                    discards[*player_index as usize].push(
+                                        game_object.players[*player_index as usize].hand
+                                            [*card_index as usize],
+                                    );
+                                }
+                                DiscardSelection::TwoDiscard {
+                                    player_index,
+                                    card_index_one,
+                                    card_index_two,
+                                } => {
+                                    discards[*player_index as usize].push(
+                                        game_object.players[*player_index as usize].hand
+                                            [*card_index_one as usize],
+                                    );
+
+                                    discards[*player_index as usize].push(
+                                        game_object.players[*player_index as usize].hand
+                                            [*card_index_two as usize],
+                                    );
+                                }
+                            }
+                        }
+                    }
+
+                    game_object
+                        .process_event(cribbage::GameEvent::DiscardSelection(discards))
+                        .unwrap();
+
+                    for client_interface in &mut client_interfaces {
+                        send_message(super::messages::GameToClient::AllDiscards, client_interface);
+                    }
+
+                    Ok("Proceeded through Discard")
+                }
+                // If there are any players not waiting, poll for DiscardOne or DiscardTwo messages
+                else {
+                    for input in &mut client_messages {
+                        if client_interfaces[input.index as usize].state
+                            == GciState::WaitingForDiscards
+                        {
+                            // Poll for DiscardTwo events when there are two players
+                            if num_players == 2 {
+                                if let super::messages::ClientToGame::DiscardTwo {
+                                    index_one,
+                                    index_two,
+                                } = input.message
+                                {
+                                    // Add DiscardSelection to input_store
+                                    if let InputStore::Discards(discards) = &mut input_store {
+                                        discards.push(DiscardSelection::TwoDiscard {
+                                            player_index: input.index,
+                                            card_index_one: index_one,
+                                            card_index_two: index_two,
+                                        });
+                                    }
+                                    // Abort from game if the InputStore is not Discards
+                                    else {
+                                        output = Err("InputStore is not Discards");
+                                        break 'game_loop;
+                                    }
+
+                                    // Announce that the discards were placed
+                                    for client_interface in &mut client_interfaces {
+                                        println!("Sent DiscardPlacedTwo");
+                                        send_message(
+                                            super::messages::GameToClient::DiscardPlacedTwo(
+                                                game_object.players[input.index as usize]
+                                                    .username
+                                                    .clone(),
+                                            ),
+                                            client_interface,
+                                        );
+                                    }
+
+                                    // Change the player's state to WaitingForServer
+                                    client_interfaces[input.index as usize].state =
+                                        GciState::WaitingForServer;
+                                }
+                                // If the message is not a DiscardTwo, send the WaitDiscardTwo
+                                // message
+                                else {
+                                    send_message(
+                                        super::messages::GameToClient::WaitDiscardTwo,
+                                        &mut client_interfaces[input.index as usize],
+                                    );
+                                }
+                            }
+                            // Poll for DiscardOne events when there are three to five players
+                            else {
+                                if let super::messages::ClientToGame::DiscardOne { index } =
+                                    input.message
+                                {
+                                    // Add DiscardSelection to input_store
+                                    if let InputStore::Discards(discards) = &mut input_store {
+                                        discards.push(DiscardSelection::OneDiscard {
+                                            player_index: input.index,
+                                            card_index: index,
+                                        });
+                                    }
+                                    // Abort from game if the InputStore is not Discards
+                                    else {
+                                        output = Err("InputStore is not Discards");
+                                        break 'game_loop;
+                                    }
+
+                                    // Announce that the discards were placed
+                                    for client_interface in &mut client_interfaces {
+                                        send_message(
+                                            super::messages::GameToClient::DiscardPlacedOne(
+                                                game_object.players[input.index as usize]
+                                                    .username
+                                                    .clone(),
+                                            ),
+                                            client_interface,
+                                        );
+                                    }
+
+                                    // Change the player's state to WaitingForServer
+                                    client_interfaces[input.index as usize].state =
+                                        GciState::WaitingForServer;
+                                }
+                                // If the message is not a DiscardOne, send a WaitDiscardOne
+                                else {
+                                    send_message(
+                                        super::messages::GameToClient::WaitDiscardOne,
+                                        &mut client_interfaces[input.index as usize],
+                                    );
+                                }
+                            }
+                        } else {
+                            send_message(
+                                super::messages::GameToClient::Error(
+                                    "Input is not required from you.".to_string(),
+                                ),
+                                &mut client_interfaces[input.index as usize],
+                            );
+                        }
+                    }
+                    Ok("Polling for DiscardOne or DiscardTwo messages")
                 }
             }
 

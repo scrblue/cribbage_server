@@ -3,7 +3,6 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::net;
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
 
 // Handles input and output to each client
 pub fn handle_client(
@@ -225,6 +224,172 @@ pub fn handle_client(
                     .write(
                         &bincode::serialize(&super::messages::GameToClient::DealtHand(hand))
                             .unwrap(),
+                    )
+                    .unwrap();
+
+                client_stream.flush().unwrap();
+                game_handler_transmitter
+                    .send(super::messages::ClientToGame::TransmissionReceived)
+                    .unwrap();
+            }
+
+            Ok(super::messages::GameToClient::WaitDiscardOne) => {
+                client_stream
+                    .write(
+                        &bincode::serialize(&super::messages::GameToClient::WaitDiscardOne)
+                            .unwrap(),
+                    )
+                    .unwrap();
+
+                client_stream.flush().unwrap();
+                game_handler_transmitter
+                    .send(super::messages::ClientToGame::TransmissionReceived)
+                    .unwrap();
+
+                // Check for input from the client and forward DiscardPlaced messages
+                client_stream.set_nonblocking(true).unwrap();
+
+                let mut received_discard_message = false;
+                while !received_discard_message {
+                    match client_stream.read(&mut packet_from_client) {
+                        Ok(_) => {
+                            let client_to_game: super::messages::ClientToGame =
+                                bincode::deserialize(&packet_from_client).unwrap();
+                            match client_to_game {
+                                super::messages::ClientToGame::DiscardOne { index } => {
+                                    game_handler_transmitter
+                                        .send(super::messages::ClientToGame::DiscardOne { index })
+                                        .unwrap();
+                                    received_discard_message = true;
+                                    packet_from_client = [0 as u8; 256];
+                                }
+                                _ => {
+                                    packet_from_client = [0 as u8; 256];
+                                }
+                            }
+                        }
+                        _ => {}
+                    };
+                    match game_handler_receiver.try_recv() {
+                        Ok(super::messages::GameToClient::DiscardPlacedOne(name)) => {
+                        client_stream
+                            .write(
+                                &bincode::serialize(&super::messages::GameToClient::DiscardPlacedOne(name))
+                                    .unwrap(),
+                            )
+                            .unwrap();
+
+                        client_stream.flush().unwrap();
+                        game_handler_transmitter
+                            .send(super::messages::ClientToGame::TransmissionReceived)
+                            .unwrap();
+
+                        },
+                        Ok(_) => println!("Invalid message to client when trying to receive a DiscardPlacedOne message"),
+                        _ => {},
+                    };
+                }
+
+                client_stream.set_nonblocking(false).unwrap();
+            }
+            Ok(super::messages::GameToClient::WaitDiscardTwo) => {
+                client_stream
+                    .write(
+                        &bincode::serialize(&super::messages::GameToClient::WaitDiscardTwo)
+                            .unwrap(),
+                    )
+                    .unwrap();
+
+                client_stream.flush().unwrap();
+                game_handler_transmitter
+                    .send(super::messages::ClientToGame::TransmissionReceived)
+                    .unwrap();
+
+                // Check for input from the client and forward DiscardPlaced messages
+                client_stream.set_nonblocking(true).unwrap();
+
+                let mut received_discard_message = false;
+                while !received_discard_message {
+                    match client_stream.read(&mut packet_from_client) {
+                        Ok(_) => {
+                            let client_to_game: super::messages::ClientToGame =
+                                bincode::deserialize(&packet_from_client).unwrap();
+                            match client_to_game {
+                                super::messages::ClientToGame::DiscardTwo {
+                                    index_one,
+                                    index_two,
+                                } => {
+                                    game_handler_transmitter
+                                        .send(super::messages::ClientToGame::DiscardTwo {
+                                            index_one,
+                                            index_two,
+                                        })
+                                        .unwrap();
+                                    received_discard_message = true;
+                                    packet_from_client = [0 as u8; 256];
+                                }
+                                _ => {
+                                    packet_from_client = [0 as u8; 256];
+                                }
+                            }
+                        }
+                        _ => {}
+                    };
+                    match game_handler_receiver.try_recv() {
+                        Ok(super::messages::GameToClient::DiscardPlacedTwo(name)) => {
+                        println!("Sending DiscardPlacedTwo");
+                        client_stream
+                            .write(
+                                &bincode::serialize(&super::messages::GameToClient::DiscardPlacedTwo(name))
+                                    .unwrap(),
+                            )
+                            .unwrap();
+
+                        client_stream.flush().unwrap();
+                        game_handler_transmitter
+                            .send(super::messages::ClientToGame::TransmissionReceived)
+                            .unwrap();
+
+                        },
+                        Ok(_) => println!("Invalid message to client when trying to receive a DiscardPlacedOne message"),
+                        _ => {},
+                    };
+                }
+
+                client_stream.set_nonblocking(false).unwrap();
+            }
+
+            Ok(super::messages::GameToClient::DiscardPlacedOne(name)) => {
+                client_stream
+                    .write(
+                        &bincode::serialize(&super::messages::GameToClient::DiscardPlacedOne(name))
+                            .unwrap(),
+                    )
+                    .unwrap();
+
+                client_stream.flush().unwrap();
+                game_handler_transmitter
+                    .send(super::messages::ClientToGame::TransmissionReceived)
+                    .unwrap();
+            }
+            Ok(super::messages::GameToClient::DiscardPlacedTwo(name)) => {
+                client_stream
+                    .write(
+                        &bincode::serialize(&super::messages::GameToClient::DiscardPlacedTwo(name))
+                            .unwrap(),
+                    )
+                    .unwrap();
+
+                client_stream.flush().unwrap();
+                game_handler_transmitter
+                    .send(super::messages::ClientToGame::TransmissionReceived)
+                    .unwrap();
+            }
+
+            Ok(super::messages::GameToClient::AllDiscards) => {
+                client_stream
+                    .write(
+                        &bincode::serialize(&super::messages::GameToClient::AllDiscards).unwrap(),
                     )
                     .unwrap();
 

@@ -18,6 +18,9 @@ pub enum ClientToGame {
     // TODO A way to determine this with user authentication for eventual lobby and account system
     Name(String),
 
+    DiscardOne { index: u8 },
+    DiscardTwo { index_one: u8, index_two: u8 },
+
     TransmissionReceived,
 }
 
@@ -61,6 +64,19 @@ pub enum GameToClient {
 
     // That the player's hand is the included vector
     DealtHand(Vec<cribbage::deck::Card>),
+
+    // That the game is waiting for a discard selection of one card
+    WaitDiscardOne,
+    // That the game is waiting for a discard selection of two cards
+    WaitDiscardTwo,
+
+    // That someone has discarded their card
+    DiscardPlacedOne(String),
+    // That someone has discarded their cards
+    DiscardPlacedTwo(String),
+
+    // That all discards have been placed
+    AllDiscards,
 
     // That an error has occured
     Error(String),
