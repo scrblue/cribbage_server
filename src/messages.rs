@@ -14,12 +14,23 @@ pub enum ClientToGame {
     // A simple confirmation from the client to continue the game model progression
     Confirmation,
 
+    // A simple denial for when the player is given a yes/no choice
+    Denial,
+
     // The name the client wishes to be known by for the duration of the game
     // TODO A way to determine this with user authentication for eventual lobby and account system
     Name(String),
 
+    // The index or indices given are to be discarded
     DiscardOne { index: u8 },
     DiscardTwo { index_one: u8, index_two: u8 },
+
+    // That a given index has been played; as a hand is four cards, an index of 0 to 3 will
+    // represent that card being played and a None will represent a go
+    PlayTurn(Option<u8>),
+
+    // That the included ScoreEvents have been given by the player for the most recent play
+    PlayScore(Vec<cribbage::score::ScoreEvent>),
 
     TransmissionReceived,
 }
@@ -77,6 +88,41 @@ pub enum GameToClient {
 
     // That all discards have been placed
     AllDiscards,
+
+    // That the game is waiting for confirmation to cut the starter card
+    WaitCutStarter,
+
+    // That the starter card has been cut and the name of the player who cut it and its value
+    CutStarter(String, cribbage::deck::Card),
+
+    // That the game is waiting to know whether the dealer calls nibs or not
+    WaitNibs,
+
+    // That the dealer has cut a jack and received two points
+    Nibs,
+
+    // That a player has played a card and the following ScoreEvents have been claimed
+    CardPlayed {
+        name: String,
+        card: cribbage::deck::Card,
+        scores: Vec<cribbage::score::ScoreEvent>,
+    },
+
+    // That the game is waiting for a player to place a card and that the valid indices are as
+    // listed
+    WaitPlay(Vec<u8>),
+
+    // That the game is waiting for ScoreEvents for the previous play
+    WaitPlayScore,
+
+    // That the game rejected the scoring because there was an invalid ScoreEvent
+    InvalidPlayScoring,
+
+    // That the game has rejected the scoring because the scores are incomplete
+    IncompletePlayScoring,
+
+    // That the scores are as follows; contains a vector of pairs of names and scores
+    ScoreUpdate(Vec<(String, u8)>),
 
     // That an error has occured
     Error(String),

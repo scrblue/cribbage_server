@@ -24,6 +24,18 @@ enum GciState {
     // The players who need to select one or two cards to discard
     WaitingForDiscards,
 
+    // The player who's confirmation processes the cut of the starter card
+    WaitingCutStarter,
+
+    // When manual scoring and underpegging is enabled and the dealer is asked for input on
+    // whether or not to call nibs
+    WaitingNibs,
+
+    // The player who has been asked for a play card selection and a scoring for the play
+    // respectively
+    WaitingForPlay,
+    WaitingForPlayScore,
+
     // When the client has disconnected and the GCI should be cleaned up
     Disconnected,
 
@@ -268,6 +280,7 @@ pub fn handle_game(
                                 }
                                 client_interfaces[input.index as usize].state =
                                     GciState::WaitingForServer;
+                                println!("Sending PlayerJoinNotification");
                                 for client_interface in &mut client_interfaces {
                                     send_message(
                                         super::messages::GameToClient::PlayerJoinNotification {
@@ -325,6 +338,7 @@ pub fn handle_game(
                         output = Err("InputStore not Names");
                         break 'game_loop;
                     }
+                    println!("GameSetup event processed");
                     Ok("GameSetup event processed")
                 }
             }
@@ -691,6 +705,16 @@ pub fn handle_game(
                         send_message(super::messages::GameToClient::AllDiscards, client_interface);
                     }
 
+                    // Prepares game for CutStarter
+                    client_interfaces
+                        [(game_object.index_dealer as usize + 1) % num_players as usize]
+                        .state = GciState::WaitingCutStarter;
+                    send_message(
+                        super::messages::GameToClient::WaitCutStarter,
+                        &mut client_interfaces
+                            [(game_object.index_dealer as usize + 1) % num_players as usize],
+                    );
+
                     Ok("Proceeded through Discard")
                 }
                 // If there are any players not waiting, poll for DiscardOne or DiscardTwo messages
@@ -722,7 +746,6 @@ pub fn handle_game(
 
                                     // Announce that the discards were placed
                                     for client_interface in &mut client_interfaces {
-                                        println!("Sent DiscardPlacedTwo");
                                         send_message(
                                             super::messages::GameToClient::DiscardPlacedTwo(
                                                 game_object.players[input.index as usize]
@@ -798,6 +821,76 @@ pub fn handle_game(
                         }
                     }
                     Ok("Polling for DiscardOne or DiscardTwo messages")
+                }
+            }
+
+            // If the state is CutStarter, then the game is waiting for confirmation from the
+            // player with the index immediately after the dealer to cut the starter card from the
+            // deck
+            cribbage::GameState::CutStarter => {
+                // If all players are waiting then the confirmation has been received and the game
+                // is ready to progress to NibsCheck or PlayWaitForCard depending on if manual
+                // scoring and underpegging are enabled
+                if are_all_players_waiting(&client_interfaces) {
+                    game_object
+                        .process_event(cribbage::GameEvent::Confirmation)
+                        .unwrap();
+                    for client_interface in &mut client_interfaces {
+                        println!("Sending CutStarter");
+                        send_message(
+                            super::messages::GameToClient::CutStarter(
+                                game_object.players[(game_object.index_dealer as usize + 1)
+                                    % num_players as usize]
+                                    .username
+                                    .clone(),
+                                game_object.starter_card,
+                            ),
+                            client_interface,
+                        );
+                    }
+
+                    if underpegging {
+                        // Prepare for NibsCheck
+                        Err("TODO")
+                    } else {
+                        // Prepare for PlayWaitForCard
+                        Err("TODO")
+                    }
+                }
+                // If any player is not waiting, then the confirmation has yet to be received
+                else {
+                    for input in &client_messages {
+                        // If the message is from the client who's confirmation is required
+                        if client_interfaces[input.index as usize].state
+                            == GciState::WaitingCutStarter
+                        {
+                            // And the message is a confirmation
+                            if input.message == super::messages::ClientToGame::Confirmation {
+                                println!("Received confirmation");
+                                client_interfaces[input.index as usize].state =
+                                    GciState::WaitingForServer;
+                            } else {
+                                // So for some reason it calls this before the Confirmation from
+                                // the client can be sent; I'll figure it out later
+                                /*send_message(
+                                    super::messages::GameToClient::WaitCutStarter,
+                                    &mut client_interfaces[input.index as usize],
+                                );*/
+                            }
+                        }
+                        // If the input received was by anyone other than the client who's state is
+                        // WaitingCutStarter, send an error
+                        else {
+                            send_message(
+                                super::messages::GameToClient::Error(
+                                    "Input is not required from you.".to_string(),
+                                ),
+                                &mut client_interfaces[input.index as usize],
+                            );
+                        }
+                    }
+
+                    Ok("Polling for confirmation for CutStarter")
                 }
             }
 
